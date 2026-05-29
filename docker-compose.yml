@@ -1,0 +1,14 @@
+services:
+  inventory-bot:
+    build:
+      context: ./inventory-bot
+    container_name: inventory-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
+    environment:
+      - DB_PATH=/data/inventory.sqlite3
+      - REFERENCE_XLSX=/data/os_reference.xlsx
+      - EXPORT_XLSX=/data/os_result.xlsx
