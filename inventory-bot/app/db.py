@@ -36,8 +36,17 @@ CREATE TABLE IF NOT EXISTS movements (
   from_cabinet TEXT,
   to_owner TEXT,
   to_cabinet TEXT,
-  comment TEXT,
+  comment TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_movements_inventory_number_id
+  ON movements(inventory_number, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_assets_current_owner
+  ON assets_current(owner);
+
+CREATE INDEX IF NOT EXISTS idx_assets_current_cabinet
+  ON assets_current(cabinet);
 """
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, coltype: str) -> None:
@@ -51,8 +60,10 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, coltype: s
         conn.commit()
 
 def connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA)
 
     # на всякий случай: если таблица movements уже была создана раньше без initiator_name

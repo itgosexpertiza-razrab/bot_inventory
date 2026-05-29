@@ -11,14 +11,11 @@ from .states import MoveFSM
 from .keyboards import assets_list_kb, asset_card_kb, confirm_kb, history_kb
 from .normalize import cab_match
 from .excel_io import import_reference_xlsx, rebuild_current_from_reference_and_history, export_result_xlsx
-from .normalize import norm_inv
 import os
-from aiogram.types import FSInputFile
 from pathlib import Path
 from PIL import Image
 from pyzbar.pyzbar import decode as zbar_decode
 from .normalize import inv_candidates_from_barcode
-from aiogram.types import CallbackQuery
 
 
 router = Router()
@@ -131,78 +128,6 @@ async def back_cb(c: CallbackQuery, db: sqlite3.Connection):
     await safe_c_answer(c)
 
 
-@router.callback_query(F.data.startswith("move:"))
-async def move_start(c: CallbackQuery, state: FSMContext):
-    inv = c.data.split(":")[1]
-    await state.clear()  # важно: чистим старое
-    await state.update_data(inv=inv, new_owner=None, new_cabinet=None)
-    await state.set_state(MoveFSM.move_owner)
-    await c.message.answer("Введите нового владельца (ФИО) или `-` чтобы не менять:", parse_mode="Markdown")
-    await safe_c_answer(c)
-
-
-@router.callback_query(F.data.startswith("cancel:"))
-async def cancel_move(c: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await c.message.answer("Операция отменена.")
-    await safe_c_answer(c)
-
-
-@router.callback_query(F.data.startswith("confirm:"))
-async def confirm_move(c: CallbackQuery, state: FSMContext, db: sqlite3.Connection):
-    data = await state.get_data()
-    inv_state = data.get("inv")
-    inv_cb = c.data.split(":")[1]
-
-    # Защита: подтверждаем только тот inv, который лежит в состоянии
-    if not inv_state or inv_state != inv_cb:
-        await safe_c_answer(c, "Сессия перемещения сбилась. Начните заново.", show_alert=True)
-        await state.clear()
-        return
-
-    r = db.execute("SELECT * FROM assets_current WHERE inventory_number = ?", (inv_cb,)).fetchone()
-    if not r:
-        await c.message.answer("❌ Объект не найден.")
-        await state.clear()
-        await safe_c_answer(c)
-        return
-
-    from_owner, from_cab = r["owner"], r["cabinet"]
-    new_owner = data.get("new_owner")
-    new_cab = data.get("new_cabinet")
-
-    to_owner = new_owner if new_owner is not None else from_owner
-    to_cab = new_cab if new_cab is not None else from_cab
-
-    moved_at = datetime.now().isoformat(timespec="seconds")
-
-    db.execute("""
-      INSERT INTO movements(
-        moved_at, initiator_tg_id, initiator_username, inventory_number,
-        from_owner, from_cabinet, to_owner, to_cabinet, comment
-      )
-      VALUES(?,?,?,?,?,?,?,?,?)
-    """, (
-        moved_at,
-        c.from_user.id,
-        c.from_user.username or "",
-        inv_cb,
-        from_owner, from_cab,
-        to_owner, to_cab,
-        None
-    ))
-
-    db.execute("""
-      UPDATE assets_current
-      SET owner = ?, cabinet = ?, updated_at = ?
-      WHERE inventory_number = ?
-    """, (to_owner, to_cab, moved_at, inv_cb))
-    db.commit()
-
-    await c.message.answer(f"✅ Сохранено.\nБыло: {from_owner} / {from_cab}\nСтало: {to_owner} / {to_cab}")
-    await state.clear()
-    await safe_c_answer(c)
-
 def is_inventory(s: str) -> bool:
     return bool(re.fullmatch(r"\d{5,10}", s.strip()))
 
@@ -218,6 +143,26 @@ def format_card(row: sqlite3.Row) -> str:
         f"🏢 Кабинет: {row['cabinet'] or '-'}\n"
         f"🧾 Серийный: {row['serial_number'] or '-'}"
     )
+
+
+async def send_asset_cards(m: Message, rows: list[sqlite3.Row], *, limit: int = 20) -> None:
+    total = len(rows)
+    shown = rows[:limit]
+
+    if total > limit:
+        await m.answer(
+            f"Найдено: {total}. Показываю первые {limit}. "
+            "Уточните фамилию или добавьте имя, чтобы сузить поиск."
+        )
+    elif total > 1:
+        await m.answer(f"Найдено: {total}.")
+
+    for r in shown:
+        await m.answer(
+            format_card(r),
+            reply_markup=asset_card_kb(r["inventory_number"]),
+            parse_mode="Markdown"
+        )
 
 @router.message(Command("start"))
 async def start(m: Message):
@@ -440,16 +385,35 @@ async def on_text(m: Message, state: FSMContext, db: sqlite3.Connection):
         await m.answer(f"Найдено: {len(items)}. Выберите:", reply_markup=assets_list_kb(items, page=0))
         return
 
-    # 1) текстовый поиск (ФИО/название/кабинет) — в Python, устойчиво к кириллице
+    # 1) сначала ищем по владельцу: фамилия/ФИО должны сразу отдавать карточки
     rows_all = db.execute("SELECT * FROM assets_current").fetchall()
 
-    rows = []
+    owner_rows = []
     for r in rows_all:
         owner = (r["owner"] or "").casefold()
+        if q_cf in owner:
+            owner_rows.append(r)
+
+    if owner_rows:
+        seen = set()
+        dedup = []
+        for r in owner_rows:
+            inv = r["inventory_number"]
+            if inv in seen:
+                continue
+            seen.add(inv)
+            dedup.append(r)
+
+        await send_asset_cards(m, dedup)
+        return
+
+    # 2) общий текстовый поиск (название/кабинет) — в Python, устойчиво к кириллице
+    rows = []
+    for r in rows_all:
         name = (r["name"] or "").casefold()
         cabinet = (r["cabinet"] or "").casefold()
 
-        if q_cf in owner or q_cf in name or q_cf in cabinet:
+        if q_cf in name or q_cf in cabinet:
             rows.append(r)
 
     if not rows:
@@ -484,16 +448,6 @@ async def on_text(m: Message, state: FSMContext, db: sqlite3.Connection):
     await m.answer(f"Найдено: {len(items)}. Выберите:", reply_markup=assets_list_kb(items, page=0))
 
 
-@router.callback_query(F.data.startswith("page:"))
-async def page_cb(c: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    items = data.get("last_search", [])
-    page = int(c.data.split(":")[1])
-    await state.update_data(page=page)
-    await c.message.edit_reply_markup(reply_markup=assets_list_kb(items, page=page))
-    await c.answer()
-
-
 @router.message(Command("owners"))
 async def owners_cmd(m: Message, db: sqlite3.Connection):
     rows = db.execute("""
@@ -513,93 +467,6 @@ async def owners_cmd(m: Message, db: sqlite3.Connection):
     )
     await m.answer(text)
 
-@router.callback_query(F.data.startswith("asset:"))
-async def asset_cb(c: CallbackQuery, db: sqlite3.Connection):
-    # ✅ отвечаем сразу, чтобы не протухло
-    try:
-        await c.answer()
-    except Exception:
-        pass
-
-    inv = c.data.split(":")[1]
-    r = db.execute("SELECT * FROM assets_current WHERE inventory_number = ?", (inv,)).fetchone()
-    if not r:
-        await c.message.answer("❌ Не найдено.")
-        return
-
-    await c.message.answer(
-        format_card(r),
-        reply_markup=asset_card_kb(inv),
-        parse_mode="Markdown"
-    )
-
-
-
-
-
-    def _esc(s: str) -> str:
-        return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-    @router.callback_query(F.data.startswith("hist:"))
-    async def hist_cb(c: CallbackQuery, db: sqlite3.Connection):
-        inv = c.data.split(":")[1]
-
-        cur = db.execute("""
-            SELECT id, moved_at, initiator_username, initiator_tg_id,
-                from_owner, from_cabinet, to_owner, to_cabinet
-            FROM movements
-            WHERE inventory_number = ?
-            ORDER BY id DESC
-            LIMIT 5
-        """, (inv,))
-        rows = cur.fetchall()
-
-        if not rows:
-            text = f"🕘 <b>История</b> по <code>{_esc(inv)}</code> пока пустая."
-            await c.message.edit_text(text, reply_markup=history_kb(inv))
-            await c.answer()
-            return
-
-        parts = [f"🕘 <b>История</b> по <code>{_esc(inv)}</code> (последние {len(rows)}):"]
-
-        for r in rows:
-            who = r["initiator_username"] or ""
-            who_id = r["initiator_tg_id"] or ""
-            who_str = _esc(who) if who else "—"
-            if who and not who.startswith("@"):
-                who_str = "@" + who_str
-
-            parts.append(
-                "\n"
-                f"🧾 <b>#{r['id']}</b> • <i>{_esc(r['moved_at'])}</i>\n"
-                f"👤 <b>Владелец:</b> {_esc(r['from_owner'] or '—')} → <b>{_esc(r['to_owner'] or '—')}</b>\n"
-                f"🏢 <b>Кабинет:</b> {_esc(r['from_cabinet'] or '—')} → <b>{_esc(r['to_cabinet'] or '—')}</b>\n"
-                f"🔐 <b>Инициатор:</b> {who_str} <code>{_esc(str(who_id))}</code>"
-            )
-
-        await c.message.edit_text("\n".join(parts), reply_markup=history_kb(inv))
-        await c.answer()
-
-@router.callback_query(F.data.startswith("back:"))
-async def back_cb(c: CallbackQuery, db: sqlite3.Connection):
-    inv = c.data.split(":")[1]
-    r = db.execute("SELECT * FROM assets_current WHERE inventory_number = ?", (inv,)).fetchone()
-    if not r:
-        await c.answer("Не найдено", show_alert=True)
-        return
-
-    # ВАЖНО: тут используем HTML (без Markdown)
-    text = (
-        f"📦 <b>{_esc(r['name'])}</b>\n"
-        f"🔢 Инв: <code>{_esc(r['inventory_number'])}</code>\n"
-        f"👤 Владелец: {_esc(r['owner'] or '—')}\n"
-        f"🏢 Кабинет: {_esc(r['cabinet'] or '—')}\n"
-        f"🧾 Серийный: {_esc(r['serial_number'] or '—')}"
-    )
-    await c.message.edit_text(text, reply_markup=asset_card_kb(inv))
-    await c.answer()
-
-
 # Перемещение — упрощённый MVP (только владелец+кабинет, дата сегодня)
 @router.callback_query(F.data.startswith("move:"))
 async def move_start(c: CallbackQuery, state: FSMContext):
@@ -608,7 +475,7 @@ async def move_start(c: CallbackQuery, state: FSMContext):
     await state.update_data(inv=inv, new_owner=None, new_cabinet=None)
     await state.set_state(MoveFSM.move_owner)
     await c.message.answer("Введите нового владельца (ФИО) или `-` чтобы не менять:", parse_mode="Markdown")
-    await c.answer()
+    await safe_c_answer(c)
 
 @router.message(MoveFSM.move_owner)
 async def move_owner(m: Message, state: FSMContext):
@@ -633,7 +500,7 @@ async def move_cab(m: Message, state: FSMContext):
 async def cancel_move(c: CallbackQuery, state: FSMContext):
     await state.clear()
     await c.message.answer("Операция отменена.")
-    await c.answer()
+    await safe_c_answer(c)
 
 @router.callback_query(F.data.startswith("confirm:"))
 async def confirm_move(c: CallbackQuery, state: FSMContext, db: sqlite3.Connection):
@@ -643,7 +510,7 @@ async def confirm_move(c: CallbackQuery, state: FSMContext, db: sqlite3.Connecti
 
     # Защита: подтверждаем только тот inv, который лежит в состоянии
     if not inv_state or inv_state != inv_cb:
-        await c.answer("Сессия перемещения сбилась. Начните заново.", show_alert=True)
+        await safe_c_answer(c, "Сессия перемещения сбилась. Начните заново.", show_alert=True)
         await state.clear()
         return
 
@@ -651,7 +518,7 @@ async def confirm_move(c: CallbackQuery, state: FSMContext, db: sqlite3.Connecti
     if not r:
         await c.message.answer("❌ Объект не найден.")
         await state.clear()
-        await c.answer()
+        await safe_c_answer(c)
         return
 
     from_owner, from_cab = r["owner"], r["cabinet"]
@@ -695,4 +562,4 @@ async def confirm_move(c: CallbackQuery, state: FSMContext, db: sqlite3.Connecti
     )
 
     await state.clear()
-    await c.answer()
+    await safe_c_answer(c)
