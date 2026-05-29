@@ -59,6 +59,55 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, coltype: s
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
         conn.commit()
 
+
+def _recreate_movements_without_fk(conn: sqlite3.Connection) -> None:
+    if not conn.execute("PRAGMA foreign_key_list(movements)").fetchall():
+        return
+
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("BEGIN")
+    try:
+        conn.execute("DROP TABLE IF EXISTS movements_new")
+        conn.execute("""
+        CREATE TABLE movements_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          moved_at TEXT NOT NULL,
+          initiator_tg_id INTEGER,
+          initiator_username TEXT,
+          initiator_name TEXT,
+          inventory_number TEXT NOT NULL,
+          from_owner TEXT,
+          from_cabinet TEXT,
+          to_owner TEXT,
+          to_cabinet TEXT,
+          comment TEXT
+        )
+        """)
+        conn.execute("""
+        INSERT INTO movements_new(
+          id, moved_at, initiator_tg_id, initiator_username, initiator_name,
+          inventory_number, from_owner, from_cabinet, to_owner, to_cabinet, comment
+        )
+        SELECT
+          id, moved_at, initiator_tg_id, initiator_username, COALESCE(initiator_name, ''),
+          inventory_number, from_owner, from_cabinet, to_owner, to_cabinet, comment
+        FROM movements
+        """)
+        conn.execute("DROP TABLE movements")
+        conn.execute("ALTER TABLE movements_new RENAME TO movements")
+        conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_movements_inventory_number_id
+          ON movements(inventory_number, id DESC)
+        """)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
 def connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
@@ -68,6 +117,7 @@ def connect(db_path: str) -> sqlite3.Connection:
 
     # на всякий случай: если таблица movements уже была создана раньше без initiator_name
     _ensure_column(conn, "movements", "initiator_name", "TEXT")
+    _recreate_movements_without_fk(conn)
 
     return conn
 
