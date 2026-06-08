@@ -1,4 +1,5 @@
 import re
+from decimal import Decimal, InvalidOperation
 
 def norm_text(s: str) -> str:
     return (s or "").strip()
@@ -43,7 +44,23 @@ def cab_match(db_value: str, query_value: str) -> bool:
     return v_raw.upper() == q
 
 def norm_inv(s: str) -> str:
-    s = "" if s is None else str(s)
+    if s is None:
+        return ""
+
+    if isinstance(s, float) and s.is_integer():
+        s = str(int(s))
+    elif isinstance(s, Decimal):
+        try:
+            s = str(int(s)) if s == s.to_integral_value() else format(s, "f")
+        except (InvalidOperation, ValueError):
+            s = str(s)
+    else:
+        s = str(s)
+
+    s = s.strip()
+    if re.fullmatch(r"\d+\.0+", s):
+        s = s.split(".", 1)[0]
+
     # оставляем только цифры
     digits = re.sub(r"\D+", "", s)
     if not digits:
