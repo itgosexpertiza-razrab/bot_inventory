@@ -9,7 +9,7 @@ from aiogram.filters import StateFilter
 from aiogram.types import FSInputFile
 from .states import MoveFSM
 from .keyboards import assets_list_kb, asset_card_kb, confirm_kb, history_kb
-from .normalize import cab_match
+from .normalize import cab_match, norm_inv
 from .excel_io import import_reference_xlsx, rebuild_current_from_reference_and_history, export_result_xlsx
 import os
 from pathlib import Path
@@ -50,7 +50,7 @@ async def asset_cb(c: CallbackQuery, db: sqlite3.Connection):
     await safe_c_answer(c)
 
     inv = c.data.split(":")[1]
-    r = db.execute("SELECT * FROM assets_current WHERE inventory_number = ?", (inv,)).fetchone()
+    r = get_asset_by_inv(db, inv)
     if not r:
         await c.message.answer("❌ Не найдено.")
         return
@@ -58,7 +58,7 @@ async def asset_cb(c: CallbackQuery, db: sqlite3.Connection):
     await c.message.answer(
         format_card(r),
         reply_markup=asset_card_kb(inv),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 
@@ -66,6 +66,13 @@ async def asset_cb(c: CallbackQuery, db: sqlite3.Connection):
 # Если у вас он случайно "уехал" отступами внутрь asset_cb — верните его на уровень router.
 def _esc(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def get_asset_by_inv(db: sqlite3.Connection, inv: str) -> sqlite3.Row | None:
+    inv = norm_inv(inv)
+    if not inv:
+        return None
+    return db.execute("SELECT * FROM assets_current WHERE inventory_number = ?", (inv,)).fetchone()
 
 @router.callback_query(F.data.startswith("hist:"))
 async def hist_cb(c: CallbackQuery, db: sqlite3.Connection):
@@ -137,11 +144,11 @@ def is_cab_query(s: str) -> bool:
 
 def format_card(row: sqlite3.Row) -> str:
     return (
-        f"📦 *{row['name']}*\n"
-        f"🔢 Инв: `{row['inventory_number']}`\n"
-        f"👤 Владелец: {row['owner'] or '-'}\n"
-        f"🏢 Кабинет: {row['cabinet'] or '-'}\n"
-        f"🧾 Серийный: {row['serial_number'] or '-'}"
+        f"📦 <b>{_esc(row['name'])}</b>\n"
+        f"🔢 Инв: <code>{_esc(row['inventory_number'])}</code>\n"
+        f"👤 Владелец: {_esc(row['owner'] or '-')}\n"
+        f"🏢 Кабинет: {_esc(row['cabinet'] or '-')}\n"
+        f"🧾 Серийный: {_esc(row['serial_number'] or '-')}"
     )
 
 
@@ -161,7 +168,7 @@ async def send_asset_cards(m: Message, rows: list[sqlite3.Row], *, limit: int = 
         await m.answer(
             format_card(r),
             reply_markup=asset_card_kb(r["inventory_number"]),
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
 
 @router.message(Command("start"))
@@ -293,7 +300,7 @@ async def on_photo(m: Message, state: FSMContext, db: sqlite3.Connection, bot):
     found = None
     found_inv = None
     for inv in cands:
-        r = db.execute("SELECT * FROM assets_current WHERE inventory_number = ?", (inv,)).fetchone()
+        r = get_asset_by_inv(db, inv)
         if r:
             found = r
             found_inv = inv
@@ -306,7 +313,7 @@ async def on_photo(m: Message, state: FSMContext, db: sqlite3.Connection, bot):
     await m.answer(
         f"🔎 Штрих-код распознан → инв: {found_inv}\n\n" + format_card(found),
         reply_markup=asset_card_kb(found["inventory_number"]),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 
@@ -331,27 +338,15 @@ async def on_text(m: Message, state: FSMContext, db: sqlite3.Connection):
 
     # 0) если чисто цифры — особая логика (кабинет / инвентарник)
     if q.isdigit():
-        rows = []
+        rows = db.execute(
+            "SELECT * FROM assets_current WHERE inventory_number = ?",
+            (norm_inv(q),)
+        ).fetchall()
 
-        # A) сначала как кабинет (1-4 цифры)
-        if 1 <= len(q) <= 4:
+        # Если инвентарник не найден, короткие числа ищем как кабинет.
+        if not rows and 1 <= len(q) <= 4:
             rows_all = db.execute("SELECT * FROM assets_current").fetchall()
             rows = [r for r in rows_all if cab_match(r["cabinet"], q)]
-
-            # если по кабинету не нашли — попробуем как инвентарник
-            if not rows:
-                inv = q.zfill(6)
-                rows = db.execute(
-                    "SELECT * FROM assets_current WHERE inventory_number = ?",
-                    (inv,)
-                ).fetchall()
-        else:
-            # B) 5+ цифр — это инвентарник
-            inv = q.zfill(6) if len(q) <= 6 else q
-            rows = db.execute(
-                "SELECT * FROM assets_current WHERE inventory_number = ?",
-                (inv,)
-            ).fetchall()
 
         if not rows:
             await m.answer("Ничего не найдено.")
@@ -373,7 +368,7 @@ async def on_text(m: Message, state: FSMContext, db: sqlite3.Connection):
             await m.answer(
                 format_card(r),
                 reply_markup=asset_card_kb(r["inventory_number"]),
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
             return
 
@@ -436,7 +431,7 @@ async def on_text(m: Message, state: FSMContext, db: sqlite3.Connection):
         await m.answer(
             format_card(r),
             reply_markup=asset_card_kb(r["inventory_number"]),
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
         return
 
