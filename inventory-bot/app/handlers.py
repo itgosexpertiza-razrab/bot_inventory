@@ -18,6 +18,7 @@ from pyzbar.pyzbar import decode as zbar_decode
 from .normalize import inv_candidates_from_barcode
 
 
+
 router = Router()
 
 
@@ -50,22 +51,34 @@ async def asset_cb(c: CallbackQuery, db: sqlite3.Connection):
     await safe_c_answer(c)
 
     inv = c.data.split(":")[1]
+
     r = get_asset_by_inv(db, inv)
+
     if not r:
         await c.message.answer("❌ Не найдено.")
         return
 
     await c.message.answer(
+
         format_card(r),
         reply_markup=asset_card_kb(inv),
         parse_mode="HTML"
     )
 
 
+
+
 # ⚠️ ВАЖНО: hist_cb должен быть на верхнем уровне файла (НЕ внутри asset_cb).
 # Если у вас он случайно "уехал" отступами внутрь asset_cb — верните его на уровень router.
 def _esc(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def get_asset_by_inv(db: sqlite3.Connection, inv: str) -> sqlite3.Row | None:
+    inv = norm_inv(inv)
+    if not inv:
+        return None
+    return db.execute("SELECT * FROM assets_current WHERE inventory_number = ?", (inv,)).fetchone()
 
 
 def get_asset_by_inv(db: sqlite3.Connection, inv: str) -> sqlite3.Row | None:
@@ -142,6 +155,7 @@ def is_cab_query(s: str) -> bool:
     s = s.strip().lower()
     return bool(re.fullmatch(r"\d{1,4}", s)) or any(k in s for k in ["сервер", "конференц", "актов"])
 
+
 def format_card(row: sqlite3.Row) -> str:
     return (
         f"📦 <b>{_esc(row['name'])}</b>\n"
@@ -170,6 +184,7 @@ async def send_asset_cards(m: Message, rows: list[sqlite3.Row], *, limit: int = 
             reply_markup=asset_card_kb(r["inventory_number"]),
             parse_mode="HTML"
         )
+
 
 @router.message(Command("start"))
 async def start(m: Message):
@@ -300,7 +315,9 @@ async def on_photo(m: Message, state: FSMContext, db: sqlite3.Connection, bot):
     found = None
     found_inv = None
     for inv in cands:
+
         r = get_asset_by_inv(db, inv)
+
         if r:
             found = r
             found_inv = inv
@@ -336,6 +353,7 @@ async def on_text(m: Message, state: FSMContext, db: sqlite3.Connection):
 
     q_cf = q.casefold()
 
+
     # 0) если чисто цифры — особая логика (кабинет / инвентарник)
     if q.isdigit():
         rows = db.execute(
@@ -347,6 +365,7 @@ async def on_text(m: Message, state: FSMContext, db: sqlite3.Connection):
         if not rows and 1 <= len(q) <= 4:
             rows_all = db.execute("SELECT * FROM assets_current").fetchall()
             rows = [r for r in rows_all if cab_match(r["cabinet"], q)]
+
 
         if not rows:
             await m.answer("Ничего не найдено.")
@@ -366,10 +385,12 @@ async def on_text(m: Message, state: FSMContext, db: sqlite3.Connection):
         if len(rows) == 1:
             r = rows[0]
             await m.answer(
+
                 format_card(r),
                 reply_markup=asset_card_kb(r["inventory_number"]),
                 parse_mode="HTML"
             )
+
             return
 
         items = [
@@ -429,6 +450,7 @@ async def on_text(m: Message, state: FSMContext, db: sqlite3.Connection):
     if len(rows) == 1:
         r = rows[0]
         await m.answer(
+
             format_card(r),
             reply_markup=asset_card_kb(r["inventory_number"]),
             parse_mode="HTML"

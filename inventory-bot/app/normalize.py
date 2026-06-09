@@ -1,6 +1,8 @@
 import re
 from decimal import Decimal, InvalidOperation
 
+
+
 def norm_text(s: str) -> str:
     return (s or "").strip()
 
@@ -43,6 +45,7 @@ def cab_match(db_value: str, query_value: str) -> bool:
 
     return v_raw.upper() == q
 
+
 def norm_inv(s: str) -> str:
     if s is None:
         return ""
@@ -63,6 +66,7 @@ def norm_inv(s: str) -> str:
 
     # оставляем только цифры
     digits = re.sub(r"\D+", "", s)
+
     if not digits:
         return ""
     # если до 6 цифр — дополняем нулями слева
@@ -109,3 +113,4 @@ def inv_candidates_from_barcode(raw: str) -> list[str]:
             seen.add(x)
             out.append(x)
     return out
+
